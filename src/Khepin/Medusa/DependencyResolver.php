@@ -6,64 +6,107 @@
 
 namespace Khepin\Medusa;
 
+use Generator;
 use GuzzleHttp\Client;
+use GuzzleHttp\Promise\EachPromise;
+use GuzzleHttp\Promise\Promise;
+use GuzzleHttp\Promise\PromiseInterface;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * Finds all the dependencies on which a given package relies
  */
-class DependencyResolver
+final class DependencyResolver
 {
-    protected $package;
+    private array $resolvedPackages = [];
+    private array $queue = [];
+    private Client $httpClient;
+    private LoggerInterface $logger;
 
-    public function __construct($package)
+    public function __construct(Client $httpClient, LoggerInterface $logger)
     {
-        $this->package = $package;
+        $this->httpClient = $httpClient;
+        $this->logger = $logger;
     }
 
-    public function resolve()
+    public function add(string $package): void
     {
-        $deps = array($this->package);
-        $resolved = array();
-
-        $guzzle = new Client(['base_uri' => 'https://packagist.org']);
-
-        while (count($deps) > 0) {
-            $package = array_pop($deps);
-            $package = $this->rename($package);
-
-            if (!$package || $this->isSystemPackage($package) === true) {
-                continue;
-            }
-
-            try {
-                $response = $guzzle->get('/packages/'.$package.'.json')->getBody()->getContents();
-            } catch (\Exception $e) {
-                continue;
-            }
-            $package = json_decode($response);
-
-            if (!is_null($package)) {
-                foreach ($package->package->versions as $version) {
-                    if (!isset($version->require)) {
-                        continue;
-                    }
-
-                    foreach ($version->require as $dependency => $version) {
-                        if (!in_array($dependency, $resolved) && !in_array($dependency, $deps)) {
-                            $deps[] = $dependency;
-                            $deps = array_unique($deps);
-                        }
-                    }
-                }
-
-                $resolved[] = $package->package->name;
-            }
+        if (isset($this->resolvedPackages[$package])) {
+            return;
         }
 
-        return $resolved;
+        if (in_array($package, $this->queue)) {
+            return;
+        }
+
+        $this->queue[] = $package;
     }
 
-    private function isSystemPackage($package) {
+    public function start(): void
+    {
+        while (count($this->queue)) {
+            $forEach = new EachPromise($this->getPromises(), ['concurrency' => 5]);
+            $forEach->promise()->wait();
+        }
+    }
+
+    public function getResolvedPackages(): array
+    {
+        return array_values(array_filter($this->resolvedPackages));
+    }
+
+    private function getPromises(): Generator
+    {
+        while ($packageName = array_pop($this->queue)) {
+            $promise = $this->resolve($packageName);
+            if ($promise !== null) {
+                yield $promise;
+            }
+        }
+    }
+
+    private function resolve(string $packageName): ?PromiseInterface
+    {
+        if ($this->isSystemPackage($packageName)) {
+            return null;
+        }
+
+        $this->logger->info('Resolve dependencies for '.$packageName);
+        // reserve slot to prevent multiple downloads of the same package
+        $this->resolvedPackages[$packageName] = null;
+
+        $promise = $this->httpClient->getAsync('/packages/'.$packageName.'.json');
+        $promise->then(function(ResponseInterface $response): void {
+            $package = json_decode($response->getBody()->getContents());
+
+            if ($package === null) {
+                // todo error handling
+                return;
+            }
+
+            foreach ($package->package->versions as $version) {
+                $packageName = $package->package->name;
+                $this->resolvedPackages[$packageName] = new MirroredPackage(
+                    $packageName,
+                    $package->package->repository
+                );
+
+                if (!isset($version->require)) {
+                    continue;
+                }
+
+                foreach ($version->require as $dependencyPackageName => $version) {
+                    $this->add($dependencyPackageName);
+                }
+            }
+        });
+
+        return $promise;
+    }
+
+    private function isSystemPackage($package): bool
+    {
         // If the package name don't contain a "/" we will skip it here.
         // In a composer.json in the require / require-dev part you normally add packages
         // you depend on. A package name follows the format "vendor/package".
@@ -80,7 +123,7 @@ class DependencyResolver
         // 	The package name consists of a vendor name and the project's name.
         // 	Often these will be identical - the vendor name just exists to prevent naming clashes.
         //	Source: https://getcomposer.org/doc/01-basic-usage.md
-        return (strstr($package, '/')) ? false: true;
+        return (strstr($package, '/')) ? false : true;
     }
 
     private function rename($package)

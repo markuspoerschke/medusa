@@ -8,6 +8,7 @@ namespace Khepin\Medusa\Command;
 
 use GuzzleHttp\Client;
 use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Logger\ConsoleLogger;
 use Symfony\Component\Console\Output\Output;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Input\InputArgument;
@@ -76,11 +77,16 @@ class AddRepoCommand extends Command
 
     protected function mirrorPackagistAndRepositories($withDependencies, $package)
     {
-        $deps = array($package);
+        $deps = [$package];
 
         if ($withDependencies) {
-            $resolver = new DependencyResolver($package);
-            $deps = $resolver->resolve();
+            $dependencyResolver = new DependencyResolver(
+                new Client(['base_uri' => 'https://packagist.org']),
+                new ConsoleLogger($this->output)
+            );
+            $dependencyResolver->add($package);
+            $dependencyResolver->start();
+            $deps = $dependencyResolver->getResolvedPackages();
         }
 
         foreach ($deps as $package) {
@@ -151,8 +157,8 @@ class AddRepoCommand extends Command
             $url = $packageInfo->package->repository;
         }
 
-        $downloader = new Downloader($package, $url);
-        $downloader->download($outputDir);
+        $downloader = new Downloader($outputDir, new ConsoleLogger($this->output));
+        $downloader->addPackage($package, $url);
     }
 
     /**

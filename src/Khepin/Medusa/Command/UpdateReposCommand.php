@@ -6,16 +6,15 @@
 
 namespace Khepin\Medusa\Command;
 
-use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputOption;
+use Khepin\Medusa\Updater;
 use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Process\Process;
+use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Logger\ConsoleLogger;
+use Symfony\Component\Console\Output\OutputInterface;
 
 class UpdateReposCommand extends Command
 {
-
     protected function configure()
     {
         $this
@@ -28,12 +27,11 @@ class UpdateReposCommand extends Command
 The <info>update</info> command reads the given medusa.json file and updates
 each mirrored git repository.
 EOT
-            )
-        ;
+            );
     }
 
     /**
-     * @param InputInterface  $input  The input instance
+     * @param InputInterface $input The input instance
      * @param OutputInterface $output The output instance
      */
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -42,30 +40,10 @@ EOT
         $dir = $config->repodir;
         $repos = glob($dir.'/*/*.git');
 
-        $fetchCmd = 'cd %s && git fetch --prune';
-        $updateCmd = 'cd %s && git update-server-info -f';
-
+        $updater = new Updater(new ConsoleLogger($output));
         foreach ($repos as $repo) {
-            $output->writeln(' - Fetching latest changes in <info>'.$repo.'</info>');
-            $process = new Process(sprintf($fetchCmd, $repo));
-            $process->setTimeout(300)
-                    ->run();
-
-            if (!$process->isSuccessful()) {
-                throw new \Exception($process->getErrorOutput());
-            }
-
-            $output->writeln($process->getOutput());
-
-            $process = new Process(sprintf($updateCmd, $repo));
-            $process->setTimeout(600)
-                    ->run();
-
-            if (!$process->isSuccessful()) {
-                throw new \Exception($process->getErrorOutput());
-            }
-
-            $output->writeln($process->getOutput());
+            $updater->addRepository($repo);
         }
+        $updater->start();
     }
 }

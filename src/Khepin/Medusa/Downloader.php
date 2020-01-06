@@ -6,55 +6,56 @@
 
 namespace Khepin\Medusa;
 
-use Symfony\Component\Process\Process;
+use Psr\Log\LoggerInterface;
 
 class Downloader
 {
-    protected $url;
+    /**
+     * @var MirroredPackage[]
+     */
+    private array $plannedDownloads = [];
+    private string $storageDirectory;
+    private Queue $queue;
 
-    protected $package;
+    private LoggerInterface $logger;
 
-    public function __construct($package, $url)
+    public function __construct(string $storageDirectory, LoggerInterface $logger)
     {
-        $this->package = $package;
-        $this->url = preg_replace('~^git@github.com:~', 'git://github.com/', $url);
+        $this->storageDirectory = $storageDirectory;
+        $this->logger = $logger;
+        $this->queue = new Queue($logger);
     }
 
-    public function download($in_dir)
+    public function start(): void
     {
-        $repo = $in_dir . '/' . $this->package . ".git";
+        // add planned downloads to queue
+        foreach ($this->plannedDownloads as $package) {
+            $this->add($package);
+        }
 
-        if (is_dir($repo)) {
+        $this->queue->start();
+    }
+
+    public function addPackage(MirroredPackage $package): void
+    {
+        $this->plannedDownloads[] = $package;
+    }
+
+    private function add(MirroredPackage $package): void
+    {
+        $targetDirectory = $this->storageDirectory.'/'.$package->getName().".git";
+
+        if (is_dir($targetDirectory)) {
+            $this->logger->info("{$package->getName()} exists. Skipping.");
             return;
         }
 
-        $cmd = 'git clone --mirror %s %s';
+        $this->logger->info("Start mirroring of {$package->getName()}");
 
-        $process = new Process(sprintf($cmd, $this->url, $repo));
-        $process->setTimeout(3600);
-        $process->run();
+        $command = (new ChainedCommand(sprintf('git clone --mirror %s %s', $package->getGitUrl(), $targetDirectory)))
+            ->then(new ChainedCommand(sprintf('cd %s && git fsck', $targetDirectory)))
+            ->then(new ChainedCommand(sprintf('cd %s && git update-server-info -f', $targetDirectory)));
 
-        if (!$process->isSuccessful()) {
-            throw new \Exception($process->getErrorOutput());
-        }
-
-        $cmd = 'cd %s && git update-server-info -f';
-
-        $process = new Process(sprintf($cmd, $repo));
-        $process->setTimeout(3600);
-        $process->run();
-
-        if (!$process->isSuccessful()) {
-            throw new \Exception($process->getErrorOutput());
-        }
-
-        $cmd = 'cd %s && git fsck';
-        $process = new Process(sprintf($cmd, $repo));
-        $process->setTimeout(3600);
-        $process->run();
-
-        if (!$process->isSuccessful()) {
-            throw new \Exception($process->getErrorOutput());
-        }
+        $this->queue->addChainedCommand($command);
     }
 }
